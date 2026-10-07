@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Highfy Sales Insights – Karachi</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+  :root { --p:#6c5ce7; --bg:#f6f7fb; --card:#fff; --tx:#1f2430; --mut:#6b7280; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, Segoe UI, Arial, sans-serif; background:var(--bg); color:var(--tx); }
+  header { padding:18px 24px; background:var(--p); color:#fff; }
+  header h1 { margin:0; font-size:22px; } header p { margin:4px 0 0; font-size:13px; opacity:.85; }
+  main { max-width:1100px; margin:20px auto; padding:0 16px; }
+  .tabs { display:flex; gap:8px; margin-bottom:16px; }
+  .tabs button { flex:1; padding:12px; border:2px solid var(--p); background:#fff; color:var(--p); font-size:15px; font-weight:600; border-radius:10px; cursor:pointer; }
+  .tabs button.on { background:var(--p); color:#fff; }
+  .card { background:var(--card); border-radius:12px; padding:16px; box-shadow:0 1px 4px rgba(0,0,0,.08); }
+  input[type=text] { width:100%; padding:12px; font-size:16px; border:1px solid #d1d5db; border-radius:8px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px; }
+  .grid.map { grid-template-columns:2fr 1fr; margin-top:0; }
+  @media (max-width:800px){ .grid, .grid.map { grid-template-columns:1fr; } }
+  .map-box { height:420px; border-radius:10px; }
+  .best { background:#e8f8ee; border-left:5px solid #22c55e; padding:12px 14px; border-radius:8px; margin-top:14px; font-size:17px; }
+  .bar { display:flex; align-items:center; gap:8px; margin:7px 0; font-size:14px; }
+  .bar span:first-child { width:140px; } .bar i { display:block; height:16px; background:var(--p); border-radius:4px; }
+  .bar b { font-size:12px; color:var(--mut); font-weight:500; }
+  .chips button { margin:4px 6px 0 0; padding:6px 12px; border:1px solid var(--p); background:#fff; color:var(--p); border-radius:20px; cursor:pointer; }
+  .chips button.on { background:var(--p); color:#fff; }
+  table { width:100%; border-collapse:collapse; font-size:14px; } td, th { padding:7px 4px; border-bottom:1px solid #eee; text-align:left; }
+  .mut { color:var(--mut); font-size:13px; } .hide { display:none; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🛍️ Highfy Sales Insights – Karachi</h1>
+  <p id="meta"></p>
+</header>
+<main>
+  <div class="tabs">
+    <button id="t1" class="on">🔍 Search by Product</button>
+    <button id="t2">🗺️ Search by Map</button>
+  </div>
+
+  <section id="p1">
+    <div class="card">
+      <input id="q" type="text" list="plist" placeholder="Type a product, e.g. Dove Shampoo" autocomplete="off">
+      <datalist id="plist"></datalist>
+      <div id="chips" class="chips"></div>
+      <div id="best" class="best hide"></div>
+    </div>
+    <div class="grid hide" id="res">
+      <div class="card"><h3 style="margin-top:0">Top areas (predicted units / month)</h3><div id="bars"></div></div>
+      <div class="card"><div id="map1" class="map-box"></div></div>
+    </div>
+  </section>
+
+  <section id="p2" class="hide">
+    <p class="mut">Click anywhere on the map to see the best-selling products in that area.</p>
+    <div class="grid map">
+      <div class="card"><div id="map2" class="map-box" style="height:520px"></div></div>
+      <div class="card" id="side"><p class="mut">No location selected yet.</p></div>
+    </div>
+  </section>
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="data.js"></script>
+<script>
+const { areas, scores, products, r2, orders } = DATA;
+const GOOGLE = 'https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}';
+const $ = id => document.getElementById(id);
+const esc = s => s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+$('meta').textContent = `Random Forest trained on ${orders.toLocaleString()} orders | R² on unseen data: ${r2}`;
+$('plist').innerHTML = products.map(p => `<option value="${esc(p)}">`).join('');
+
+// ---------- helpers ----------
+const topProducts = (area, n) => Object.entries(scores[area]).sort((a, b) => b[1] - a[1]).slice(0, n);
+const topAreas = (prod, n) => Object.keys(areas).map(a => [a, scores[a][prod]]).sort((a, b) => b[1] - a[1]).slice(0, n);
+function nearest(lat, lng) {
+  let best = null, bd = 1e9;
+  for (const [n, a] of Object.entries(areas)) {
+    const d = Math.hypot((a.lat - lat) * 111, (a.lng - lng) * 111 * Math.cos(lat * Math.PI / 180));
+    if (d < bd) { bd = d; best = n; }
+  }
+  return [best, bd];
+}
+const bigrams = s => { s = s.toLowerCase().replace(/[^a-z0-9]/g, ''); const b = new Set(); for (let i = 0; i < s.length - 1; i++) b.add(s.slice(i, i + 2)); return b; };
+function sim(a, b) { const A = bigrams(a), B = bigrams(b); let n = 0; A.forEach(x => B.has(x) && n++); return 2 * n / ((A.size + B.size) || 1); }
+function match(q) {
+  q = q.trim().toLowerCase(); if (!q) return [];
+  const hits = products.filter(p => p.toLowerCase().includes(q));
+  return hits.length ? hits : products.map(p => [p, sim(q, p)]).filter(x => x[1] > 0.35).sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]);
+}
+const newMap = id => {
+  const m = L.map(id).setView([24.89, 67.08], 11);
+  L.tileLayer(GOOGLE, { maxZoom: 20, attribution: 'Map data © Google' }).addTo(m);
+  return m;
+};
+const dots = m => Object.entries(areas).forEach(([n, a]) =>
+  L.circleMarker([a.lat, a.lng], { radius: 5, color: '#6c5ce7', fillOpacity: .9 }).bindTooltip(n).addTo(m));
+
+// ---------- tabs ----------
+const map1 = newMap('map1'), map2 = newMap('map2');
+dots(map2);
+function tab(n) {
+  $('p1').classList.toggle('hide', n !== 1); $('p2').classList.toggle('hide', n !== 2);
+  $('t1').classList.toggle('on', n === 1); $('t2').classList.toggle('on', n === 2);
+  setTimeout(() => (n === 1 ? map1 : map2).invalidateSize(), 50);
+}
+$('t1').onclick = () => tab(1); $('t2').onclick = () => tab(2);
+
+// ---------- search by product ----------
+const layer1 = L.layerGroup().addTo(map1);
+function show(prod) {
+  const r = topAreas(prod, 8), max = r[0][1];
+  $('best').classList.remove('hide'); $('res').classList.remove('hide');
+  $('best').innerHTML = `🏆 <b>${esc(prod)}</b> sells best in <b>${esc(r[0][0])}</b>`;
+  $('bars').innerHTML = r.map(([a, u]) =>
+    `<div class="bar"><span>${esc(a)}</span><i style="width:${u / max * 60}%"></i><b>${u.toFixed(0)}</b></div>`).join('');
+  layer1.clearLayers();
+  r.forEach(([a, u]) => L.circleMarker([areas[a].lat, areas[a].lng],
+    { radius: 6 + u / max * 18, color: 'red', fillOpacity: .5 }).bindTooltip(`${a}: ${u.toFixed(0)}`).addTo(layer1));
+  setTimeout(() => map1.invalidateSize(), 50);
+}
+$('q').addEventListener('input', () => {
+  const hits = match($('q').value);
+  $('chips').innerHTML = '';
+  if (!hits.length) {
+    $('res').classList.add('hide');
+    $('best').classList.toggle('hide', !$('q').value.trim());
+    $('best').textContent = 'No matching product. Try another name.'; return;
+  }
+  if (hits.length > 1) {
+    hits.forEach((h, i) => { const b = document.createElement('button'); b.textContent = h; b.onclick = () => { show(h); [...$('chips').children].forEach(c => c.classList.toggle('on', c === b)); }; if (i === 0) b.classList.add('on'); $('chips').appendChild(b); });
+  }
+  show(hits[0]);
+});
+
+// ---------- search by map ----------
+let marker = null;
+map2.on('click', e => {
+  const { lat, lng } = e.latlng, [area, km] = nearest(lat, lng);
+  if (marker) map2.removeLayer(marker);
+  if (km > 6) {
+    marker = L.marker([lat, lng]).addTo(map2).bindPopup('No Highfy data near this point.').openPopup();
+    $('side').innerHTML = '<p class="mut">No Highfy data near this point. Click closer to a purple dot.</p>'; return;
+  }
+  const t3 = topProducts(area, 3), t5 = topProducts(area, 5);
+  marker = L.marker([lat, lng]).addTo(map2)
+    .bindPopup(`<b>${esc(area)}</b><br>` + t3.map(([p], i) => `${i + 1}. ${esc(p)}`).join('<br>')).openPopup();
+  $('side').innerHTML = `<h3 style="margin-top:0">📍 ${esc(area)}</h3><table><tr><th>Product</th><th>Units / month</th></tr>` +
+    t5.map(([p, u]) => `<tr><td>${esc(p)}</td><td>${u.toFixed(0)}</td></tr>`).join('') + '</table>';
+});
+</script>
+</body>
+</html>
